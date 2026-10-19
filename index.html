@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gesture Fire — Hand-Gesture FPS</title>
+<style>
+  :root {
+    --accent: #ff5b3b;
+    --accent-blue: #3ba7ff;
+    --ok-green: #4fdc7a;
+    --warn-amber: #ffb63b;
+    --ui-bg: rgba(10, 12, 16, 0.78);
+    --ui-border: rgba(255, 255, 255, 0.1);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+    font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+    color: #eee; user-select: none;
+  }
+  button { font-family: inherit; cursor: pointer; }
+
+  #game-canvas { position: fixed; inset: 0; display: block; width: 100%; height: 100%; outline: none; z-index: 1; }
+
+  /* ---- webcam + landmark debug overlay (small PIP corner) ---- */
+  #cam-pip {
+    position: fixed; left: 14px; bottom: 14px; z-index: 20;
+    width: 220px; aspect-ratio: 4/3; border-radius: 10px; overflow: hidden;
+    border: 1px solid var(--ui-border); background: #000;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+    display: none;
+  }
+  #cam-pip.visible { display: block; }
+  /* Mirrored (scaleX(-1)) so it visually matches the mirrored landmark
+     coordinates handTracker.js produces — see debugOverlay.js. */
+  #webcam { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  /* object-fit: cover must match #webcam exactly — the canvas's internal
+     pixel buffer is sized to the video's full native resolution (see
+     debugOverlay.js's _resizeCanvas), and landmark coordinates are drawn as
+     fractions of that full frame. Without matching object-fit, the video
+     crops to fill this box while the canvas would just stretch (no crop),
+     so the two disagree on where a given normalized (x,y) lands on
+     screen — the skeleton visibly drifts off the hand, especially near the
+     edges of frame. */
+  #landmark-canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #cam-pip-label {
+    position: absolute; top: 4px; left: 6px; font-size: 10px; letter-spacing: 1px;
+    text-transform: uppercase; opacity: 0.8; background: rgba(0,0,0,0.5); padding: 2px 6px; border-radius: 4px;
+  }
+
+  /* ---- HUD ---- */
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+
+  .panel {
+    background: var(--ui-bg); border-radius: 10px; border: 1px solid var(--ui-border);
+    backdrop-filter: blur(6px);
+  }
+
+  /* left/right insets clear the Debug button (left:14, ~90px wide) and the
+     stacked Controls/Settings buttons (right:16, ~130px wide) — without
+     this, both toggle buttons sit at the exact same corners as this bar and
+     paint over the score/wave panels (z-index 15/16 vs. this bar's 5). */
+  #top-bar {
+    position: absolute; top: 16px; left: 110px; right: 150px;
+    display: flex; justify-content: space-between; align-items: flex-start;
+  }
+  #score-wrap, #wave-wrap {
+    padding: 8px 16px; font-size: 13px; letter-spacing: 0.5px;
+  }
+  #score-wrap .value, #wave-wrap .value { font-size: 20px; font-weight: 700; margin-left: 8px; }
+  #fps-counter {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    padding: 4px 10px; font-size: 11px; opacity: 0.6;
+  }
+
+  /* Fixes head-tilt drift instantly — see config.js's headTurn comment.
+     Deliberately prominent (not tucked away like Debug/Settings) since
+     it's a real fix a player may need mid-match, not just a dev tool. */
+  #recenter-btn {
+    position: fixed; top: 44px; left: 50%; transform: translateX(-50%); z-index: 16;
+    pointer-events: auto; display: none;
+    padding: 6px 16px; border: 1px solid var(--accent-blue); border-radius: 8px;
+    background: rgba(59,167,255,0.12); color: var(--accent-blue); font-size: 12px; font-weight: 600;
+  }
+  #recenter-btn.show { display: block; }
+  #recenter-btn.flash { animation: recenterFlash 0.4s ease-out; }
+  @keyframes recenterFlash { 0% { background: var(--accent-blue); color: #04121e; } 100% { background: rgba(59,167,255,0.12); color: var(--accent-blue); } }
+
+  #crosshair {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 26px; height: 26px; transition: width 0.15s, height 0.15s;
+  }
+  #crosshair.aiming { width: 14px; height: 14px; }
+  #crosshair::before, #crosshair::after { content: ''; position: absolute; background: rgba(255,255,255,0.85); }
+  #crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-1px); }
+  #crosshair::after { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-1px); }
+  #crosshair .dot {
+    position: absolute; left: 50%; top: 50%; width: 4px; height: 4px;
+    background: var(--accent); border-radius: 50%; transform: translate(-50%,-50%);
+  }
+  #crosshair.hit-flash::before, #crosshair.hit-flash::after { background: var(--ok-green); }
+
+  #hit-marker {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    width: 36px; height: 36px; opacity: 0; pointer-events: none;
+  }
+  #hit-marker::before, #hit-marker::after {
+    content: ''; position: absolute; width: 100%; height: 2px; top: 50%; background: var(--ok-green);
+  }
+  #hit-marker::before { transform: translateY(-50%) rotate(45deg); }
+  #hit-marker::after { transform: translateY(-50%) rotate(-45deg); }
+  #hit-marker.show { animation: hitmarker 0.28s ease-out; }
+  @keyframes hitmarker { 0% { opacity: 1; transform: translate(-50%,-50%) scale(0.6); } 100% { opacity: 0; transform: translate(-50%,-50%) scale(1.3); } }
+
+  /* left/right insets clear the webcam PIP (#cam-pip: left:14, 220px wide,
+     bottom-anchored) that #ammo-wrap used to sit directly on top of — ammo
+     now lives centered at the bottom instead (see #ammo-wrap below), so
+     this bar only needs to clear the PIP on its own account. */
+  #bottom-bar {
+    position: absolute; bottom: 16px; left: 250px; right: 16px;
+    display: flex; justify-content: flex-end; align-items: flex-end;
+  }
+  #ammo-wrap {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 6; padding: 10px 18px; min-width: 140px; text-align: center;
+  }
+  #ammo-label { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; opacity: 0.75; }
+  #ammo-count { font-size: 28px; font-weight: 700; }
+  #ammo-count.low { color: var(--warn-amber); }
+  #ammo-count.empty { color: var(--accent); }
+  #reload-bar-track {
+    margin-top: 6px; width: 100%; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.12);
+    overflow: hidden; display: none;
+  }
+  #reload-bar-track.active { display: block; }
+  #reload-bar-fill { height: 100%; width: 0%; background: var(--accent-blue); transition: width 0.05s linear; }
+
+  #move-indicator { padding: 8px 14px; font-size: 12px; display: flex; gap: 10px; align-items: center; }
+  #move-indicator .chip {
+    padding: 3px 9px; border-radius: 12px; background: rgba(255,255,255,0.08); opacity: 0.5; transition: all 0.15s;
+  }
+  #move-indicator .chip.active { opacity: 1; background: var(--accent-blue); color: #04121e; font-weight: 700; }
+
+  #kill-feed {
+    position: absolute; top: 70px; left: 50%; transform: translate(-50%, -8px);
+    font-size: 15px; font-weight: 600; letter-spacing: 0.5px; opacity: 0;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.7);
+  }
+  #kill-feed.show { animation: killfeed 1.1s ease-out; }
+  @keyframes killfeed { 0% { opacity: 0; transform: translate(-50%, 4px); } 15% { opacity: 1; transform: translate(-50%, -8px); } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -16px); } }
+
+  #reload-prompt {
+    position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%);
+    font-size: 13px; padding: 6px 14px; opacity: 0; color: var(--warn-amber);
+    background: rgba(0,0,0,0.5); border-radius: 8px; transition: opacity 0.2s;
+  }
+  #reload-prompt.show { opacity: 1; }
+
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 4; opacity: 0;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(255,60,40,0.35) 100%);
+    transition: opacity 0.4s;
+  }
+  #vignette.show { opacity: 1; }
+
+  /* ---- gesture legend ---- */
+  #legend {
+    position: fixed; right: 16px; top: 70px; z-index: 15; width: 250px;
+    padding: 12px 14px; font-size: 12px; line-height: 1.5; pointer-events: auto;
+    max-height: 60vh; overflow-y: auto;
+  }
+  #legend h3 { margin: 0 0 8px; font-size: 12px; letter-spacing: 1px; text-transform: uppercase; opacity: 0.8; }
+  #legend table { width: 100%; border-collapse: collapse; }
+  #legend td { padding: 3px 0; vertical-align: top; }
+  #legend td:first-child { opacity: 0.75; padding-right: 8px; white-space: nowrap; }
+  #legend-toggle {
+    position: fixed; right: 16px; top: 16px; z-index: 16; pointer-events: auto;
+    padding: 8px 12px; border: 1px solid var(--ui-border); border-radius: 8px; color: #eee; font-size: 12px;
+  }
+
+  /* ---- settings panel ---- */
+  #settings-toggle {
+    position: fixed; right: 16px; top: 54px; z-index: 16; pointer-events: auto;
+    padding: 8px 12px; border: 1px solid var(--ui-border); border-radius: 8px; color: #eee; font-size: 12px;
+    display: none;
+  }
+  #settings-panel {
+    position: fixed; right: 16px; top: 92px; z-index: 17; width: 280px;
+    padding: 14px; font-size: 12px; pointer-events: auto; display: none;
+    max-height: 70vh; overflow-y: auto;
+  }
+  #settings-panel.open { display: block; }
+  #settings-panel h3 { margin: 0 0 10px; font-size: 12px; letter-spacing: 1px; text-transform: uppercase; opacity: 0.8; }
+  .setting-row { margin-bottom: 10px; }
+  .setting-row label { display: flex; justify-content: space-between; margin-bottom: 3px; opacity: 0.85; }
+  .setting-row input[type=range] { width: 100%; }
+  .setting-row .checkbox-row { display: flex; align-items: center; gap: 8px; }
+
+  /* ---- debug panel ---- */
+  #debug-toggle {
+    position: fixed; left: 14px; top: 16px; z-index: 16; pointer-events: auto;
+    padding: 8px 12px; border: 1px solid var(--ui-border); border-radius: 8px; color: #eee; font-size: 12px;
+  }
+  #debug-panel {
+    position: fixed; left: 250px; bottom: 14px; z-index: 20; width: 300px;
+    padding: 10px 12px; font-size: 11px; font-family: 'SF Mono', Menlo, Consolas, monospace;
+    line-height: 1.6; display: none;
+  }
+  #debug-panel.open { display: block; }
+  #debug-panel .row { display: flex; justify-content: space-between; }
+  #debug-panel .bool-true { color: var(--ok-green); font-weight: 700; }
+  #debug-panel .bool-false { opacity: 0.4; }
+
+  /* ---- overlays (start / loading / error / calibration) ---- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center; gap: 18px;
+    background: radial-gradient(ellipse at center, #14181f 0%, #05070a 100%);
+    padding: 24px;
+  }
+  .overlay[hidden] { display: none; }
+  .overlay h1 { font-size: 34px; margin: 0; letter-spacing: 0.5px; }
+  .overlay p { max-width: 480px; opacity: 0.8; line-height: 1.6; margin: 0; font-size: 14px; }
+  .overlay .btn {
+    padding: 14px 34px; font-size: 16px; font-weight: 700; border-radius: 10px; border: none;
+    background: var(--accent); color: #1a0500; letter-spacing: 0.5px;
+  }
+  .overlay .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .overlay .btn.secondary { background: rgba(255,255,255,0.12); color: #eee; }
+  .spinner {
+    width: 34px; height: 34px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.2);
+    border-top-color: var(--accent-blue); animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #calibration-overlay .step-progress-track {
+    width: 260px; height: 8px; border-radius: 4px; background: rgba(255,255,255,0.12); overflow: hidden;
+  }
+  #calibration-overlay .step-progress-fill { height: 100%; width: 0%; background: var(--ok-green); transition: width 0.05s linear; }
+  #calibration-overlay .step-count { font-size: 12px; opacity: 0.6; letter-spacing: 1px; text-transform: uppercase; }
+  #calibration-overlay .step-visual { font-size: 56px; }
+
+  #error-overlay { display: none; }
+  #error-overlay.show { display: flex; }
+  #error-overlay p.err-detail { color: var(--warn-amber); font-size: 12px; font-family: monospace; }
+
+  #test-results {
+    position: fixed; inset: 0; z-index: 100; background: #05070a; color: #eee;
+    font-family: monospace; font-size: 13px; padding: 24px; overflow: auto; white-space: pre-wrap;
+    display: none;
+  }
+  #test-results.show { display: block; }
+</style>
+</head>
+<body>
+
+<canvas id="game-canvas"></canvas>
+
+<div id="cam-pip">
+  <video id="webcam" playsinline muted></video>
+  <canvas id="landmark-canvas"></canvas>
+  <div id="cam-pip-label">Tracking</div>
+</div>
+
+<div id="hud">
+  <div id="top-bar">
+    <div id="score-wrap" class="panel">SCORE<span class="value" id="score-value">0</span></div>
+    <div id="wave-wrap" class="panel">WAVE<span class="value" id="wave-value">1</span></div>
+  </div>
+  <div id="fps-counter" class="panel">-- fps</div>
+
+  <div id="crosshair"><div class="dot"></div></div>
+  <div id="hit-marker"></div>
+  <div id="kill-feed"></div>
+  <div id="reload-prompt">RIGHT PALM OPEN TO RELOAD</div>
+
+  <div id="ammo-wrap" class="panel">
+    <div id="ammo-label">Ammo</div>
+    <div id="ammo-count">8 / 8</div>
+    <div id="reload-bar-track"><div id="reload-bar-fill"></div></div>
+  </div>
+
+  <div id="bottom-bar">
+    <div id="move-indicator" class="panel">
+      <span class="chip" id="chip-move">FORWARD</span>
+      <span class="chip" id="chip-turn-l">◀ TURN</span>
+      <span class="chip" id="chip-turn-r">TURN ▶</span>
+      <span class="chip" id="chip-aim">AIM</span>
+    </div>
+  </div>
+</div>
+
+<div id="vignette"></div>
+
+<button id="recenter-btn" title="Zero out head-tilt drift — press while looking straight ahead">Recenter View</button>
+
+<button id="legend-toggle" class="panel">Controls</button>
+<div id="legend" class="panel" hidden>
+  <h3>Gesture Controls</h3>
+  <table>
+    <tr><td>Left fist</td><td>Stop moving</td></tr>
+    <tr><td>Left open palm</td><td>Move forward</td></tr>
+    <tr><td>Tilt head left/right</td><td>Turn (look) left/right</td></tr>
+    <tr><td>Right finger-gun</td><td>Aim (zoom in)</td></tr>
+    <tr><td>Curl trigger finger</td><td>Fire (while aiming)</td></tr>
+    <tr><td>Right open palm</td><td>Reload</td></tr>
+  </table>
+  <p style="margin: 10px 0 0; opacity: 0.7; font-size: 11px; line-height: 1.5;">
+    View drifting on its own? Press <strong>Recenter View</strong> (top
+    center) while looking straight ahead.
+  </p>
+</div>
+
+<button id="debug-toggle" class="panel">Debug</button>
+<div id="debug-panel" class="panel"></div>
+
+<button id="settings-toggle" class="panel">Settings</button>
+<div id="settings-panel" class="panel"></div>
+
+<!-- ============================= OVERLAYS ============================= -->
+
+<div id="start-overlay" class="overlay">
+  <h1>Gesture Fire</h1>
+  <p>
+    A first-person shooter with <strong>no keyboard, no mouse</strong> — every
+    action is a hand gesture (or a head tilt) read from your webcam. Left
+    hand: open palm walks forward, a fist stops you. Tilt your head left or
+    right to turn. Right hand: a finger-gun aims, curling the trigger finger
+    fires, and an open palm reloads.
+  </p>
+  <p id="mock-note" style="display:none; color: var(--accent-blue);">
+    Running in keyboard mock mode (?mock=1) — no camera needed. W to move,
+    A/D to turn, hold Shift to aim, Space to fire, R to reload.
+  </p>
+  <button class="btn" id="start-btn">Enable Camera &amp; Start</button>
+</div>
+
+<div id="loading-overlay" class="overlay" hidden>
+  <div class="spinner"></div>
+  <p id="loading-text">Loading hand-tracking model…</p>
+</div>
+
+<div id="error-overlay" class="overlay">
+  <h1>Something went wrong</h1>
+  <p id="error-message">Unknown error.</p>
+  <p class="err-detail" id="error-detail"></p>
+  <button class="btn secondary" id="error-retry-btn">Try Again</button>
+</div>
+
+<div id="calibration-overlay" class="overlay" hidden>
+  <div class="step-count" id="cal-step-count">STEP 1 / 5</div>
+  <div class="step-visual" id="cal-visual">✊</div>
+  <h1 id="cal-label">Make a FIST with your LEFT hand</h1>
+  <p id="cal-sub">This is how you stop moving.</p>
+  <div class="step-progress-track"><div class="step-progress-fill" id="cal-progress"></div></div>
+  <button class="btn secondary" id="cal-skip-btn">Skip Calibration</button>
+</div>
+
+<pre id="test-results"></pre>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

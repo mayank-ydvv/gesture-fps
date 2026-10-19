@@ -1,0 +1,20 @@
+{
+  "name": "gesture-fps",
+  "version": "1.0.0",
+  "description": "First-person shooter controlled entirely by webcam hand gestures (no keyboard/mouse).",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "echo 'No CLI test runner — start the dev server and open /?test=1 to run the in-browser classifier/hitscan test suite (see README).'"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.14",
+    "three": "0.160.0"
+  },
+  "devDependencies": {
+    "vite": "5.4.10"
+  }
+}
